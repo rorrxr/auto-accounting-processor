@@ -1,19 +1,31 @@
 package com.example.autoaccountingprocessor.domain.entity;
 
-import jakarta.persistence.Entity;
-import jakarta.persistence.Id;
-import lombok.AllArgsConstructor;
-import lombok.Getter;
-import lombok.NoArgsConstructor;
-import lombok.Setter;
+import jakarta.persistence.*;
+import lombok.*;
 
+import java.time.LocalDateTime;
+
+/**
+ * 회사 엔티티
+ */
 @Entity
-@AllArgsConstructor
-@NoArgsConstructor
 @Getter
-@Setter
+@NoArgsConstructor(access = AccessLevel.PROTECTED)
+@AllArgsConstructor(access = AccessLevel.PRIVATE)
+@Builder
 public class Company {
+
     @Id
-    private String id;  // e.g., com_1
-    private String name;
+    @Column(length = 50)
+    private String companyId; // 고유 ID
+
+    @Column(length = 100, nullable = false)
+    private String companyName; // 회사 이름
+
+    private LocalDateTime createdAt; // 생성 시각
+
+    @PrePersist
+    protected void onCreate() {
+        createdAt = LocalDateTime.now();
+    }
 }

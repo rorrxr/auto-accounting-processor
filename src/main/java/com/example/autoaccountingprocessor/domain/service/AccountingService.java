@@ -1,102 +1,116 @@
 package com.example.autoaccountingprocessor.domain.service;
 
-import com.example.autoaccountingprocessor.common.util.CsvParser;
-import com.example.autoaccountingprocessor.domain.dto.AccountingRecordResponseDto;
-import com.example.autoaccountingprocessor.domain.entity.Category;
-import com.example.autoaccountingprocessor.domain.entity.Company;
-import com.example.autoaccountingprocessor.domain.entity.Transaction;
-import com.example.autoaccountingprocessor.domain.repository.CategoryRepository;
-import com.example.autoaccountingprocessor.domain.repository.CompanyRepository;
-import com.example.autoaccountingprocessor.domain.repository.TransactionRepository;
-import com.example.autoaccountingprocessor.common.util.RuleLoader;
-import com.example.autoaccountingprocessor.domain.rule.CategoryRule;
+import com.example.autoaccountingprocessor.domain.dto.CategorySummaryResponse;
+import com.example.autoaccountingprocessor.domain.dto.ClassifiedTransactionResponse;
+import com.example.autoaccountingprocessor.domain.dto.ProcessingResultResponse;
+import com.example.autoaccountingprocessor.domain.dto.UnclassifiedTransactionResponse;
+import com.example.autoaccountingprocessor.domain.entity.*;
+import com.example.autoaccountingprocessor.domain.repository.*;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
-import java.util.Map;
 import java.util.stream.Collectors;
-import lombok.RequiredArgsConstructor;
 
-
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class AccountingService {
 
+    private final TransactionProcessingService transactionProcessingService;
+    private final ClassificationService classificationService;
+    private final RuleManagementService ruleManagementService;
+
+    private final ClassifiedTransactionRepository classifiedTransactionRepository;
+    private final UnclassifiedTransactionRepository unclassifiedTransactionRepository;
     private final CompanyRepository companyRepository;
-    private final CategoryRepository categoryRepository;
-    private final TransactionRepository transactionRepository;
 
-    private static final String UNCATEGORIZED = "미분류";
+    /**
+     * CSV 거래내역과 JSON 규칙을 받아 통합 처리 (참고 레포지토리 API와 동일한 방식)
+     */
+    @Transactional
+    public ProcessingResultResponse processAccountingFiles(MultipartFile transactionsFile,
+                                                           MultipartFile rulesFile) {
+        long startTime = System.currentTimeMillis();
 
-    public void process(MultipartFile csvFile, MultipartFile rulesFile) {
-        List<Transaction> transactions = CsvParser.parse(csvFile);
-        Map<String, Map<String, CategoryRule>> rules = RuleLoader.load(rulesFile);
+        try {
+            log.info("회계 처리 시작 - 거래내역: {}, 규칙: {}",
+                    transactionsFile.getOriginalFilename(),
+                    rulesFile.getOriginalFilename());
 
-        for (Transaction tx : transactions) {
-            String companyId = findCompanyId(tx.getDescription(), rules);
-            Company company = null;
-            Category category;
+            // 1. 분류 규칙 로드
+            ruleManagementService.loadRulesFromJson(rulesFile);
 
-            // 회사 ID가 식별되면
-            if (companyId != null) {
-                company = companyRepository.findById(companyId).orElse(null);
-                Map<String, CategoryRule> companyRules = rules.get(companyId);
-                CategoryRule categoryRule = findCategoryRule(tx.getDescription(), companyRules);
+            // 2. 거래 내역 파싱 및 저장
+            List<Transaction> savedTransactions = transactionProcessingService.processTransactions(transactionsFile);
 
-                if (categoryRule != null) {
-                    category = categoryRepository.findByName(categoryRule.getCategoryName())
-                            .orElseGet(() -> categoryRepository.save(new Category(categoryRule.getCategoryName())));
-                } else {
-                    category = getUncategorizedCategory();
-                }
-            } else {
-                category = getUncategorizedCategory();
-            }
+            // 3. 거래 분류 실행
+            int classifiedCount = classificationService.classifyTransactions(savedTransactions);
 
-            tx.setCompany(company);    // company는 null일 수 있음 (귀속 불가)
-            tx.setCategory(category);  // 반드시 존재
+            long processingTime = System.currentTimeMillis() - startTime;
 
-            transactionRepository.save(tx);
+            log.info("회계 처리 완료 - 총 {}건 중 {}건 분류 성공 ({}ms 소요)",
+                    savedTransactions.size(), classifiedCount, processingTime);
+
+            return ProcessingResultResponse.success(savedTransactions.size(), classifiedCount, processingTime);
+
+        } catch (Exception e) {
+            log.error("회계 처리 중 오류 발생", e);
+            throw new RuntimeException("회계 처리에 실패했습니다: " + e.getMessage(), e);
         }
     }
 
-    public List<AccountingRecordResponseDto> getRecordsByCompany(String companyId) {
-        return transactionRepository.findByCompanyId(companyId).stream()
-                .map(AccountingRecordResponseDto::from)
+    /**
+     * 특정 회사의 분류된 거래 조회 (참고 레포지토리 API와 동일)
+     */
+    public List<ClassifiedTransactionResponse> getClassifiedRecords(String companyId) {
+        return classifiedTransactionRepository.findByCompanyCompanyIdOrderByClassifiedAtDesc(companyId)
+                .stream()
+                .map(ClassifiedTransactionResponse::from)
                 .collect(Collectors.toList());
     }
 
-    // 설명에 포함된 키워드로 회사 ID 찾기
-    private String findCompanyId(String description, Map<String, Map<String, CategoryRule>> rules) {
-        for (Map.Entry<String, Map<String, CategoryRule>> entry : rules.entrySet()) {
-            String companyId = entry.getKey();
-            Map<String, CategoryRule> keywords = entry.getValue();
-
-            for (String keyword : keywords.keySet()) {
-                if (description.contains(keyword)) {
-                    return companyId;
-                }
-            }
-        }
-        return null;
+    /**
+     * 특정 회사의 분류된 거래 조회 (페이징)
+     */
+    public Page<ClassifiedTransactionResponse> getClassifiedRecords(String companyId, Pageable pageable) {
+        return classifiedTransactionRepository.findByCompanyCompanyId(companyId, pageable)
+                .map(ClassifiedTransactionResponse::from);
     }
 
-    // 설명에 포함된 키워드로 계정과목 Rule 찾기
-    private CategoryRule findCategoryRule(String description, Map<String, CategoryRule> ruleMap) {
-        if (ruleMap == null) return null;
-
-        for (Map.Entry<String, CategoryRule> entry : ruleMap.entrySet()) {
-            if (description.contains(entry.getKey())) {
-                return entry.getValue();
-            }
-        }
-        return null;
+    /**
+     * 특정 회사의 미분류 거래 조회 (참고 레포지토리 API와 동일)
+     */
+    public List<UnclassifiedTransactionResponse> getUnclassifiedRecords(String companyId) {
+        return unclassifiedTransactionRepository.findByCompanyCompanyIdOrderById(companyId)
+                .stream()
+                .map(UnclassifiedTransactionResponse::from)
+                .collect(Collectors.toList());
     }
 
-    // '미분류' Category를 반환 (없으면 생성)
-    private Category getUncategorizedCategory() {
-        return categoryRepository.findByName(UNCATEGORIZED)
-                .orElseGet(() -> categoryRepository.save(new Category(UNCATEGORIZED)));
+    /**
+     * 특정 회사의 전체 수입/지출 요약 (참고 레포지토리 API와 동일)
+     */
+    public CategorySummaryResponse getTotalSummary(String companyId) {
+        Company company = companyRepository.findById(companyId)
+                .orElseThrow(() -> new IllegalArgumentException("회사를 찾을 수 없습니다: " + companyId));
+
+        Long totalIncome = classifiedTransactionRepository.getTotalDepositByCompany(companyId);
+        Long totalExpenditure = classifiedTransactionRepository.getTotalWithdrawByCompany(companyId);
+        long recordCount = classifiedTransactionRepository.countByCompanyId(companyId);
+
+        return CategorySummaryResponse.total(company.getCompanyName(), totalIncome, totalExpenditure, recordCount);
+    }
+
+    /**
+     * 특정 회사의 카테고리별 수입/지출 요약 (참고 레포지토리 API와 동일)
+     */
+    public List<CategorySummaryResponse> getCategorySummaries(String companyId) {
+        return classificationService.getCategorySummaries(companyId);
     }
 }
