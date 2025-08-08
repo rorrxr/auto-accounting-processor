@@ -15,6 +15,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
+import jakarta.persistence.EntityManager;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -27,6 +28,7 @@ public class RuleManagementService {
     private final CategoryRepository categoryRepository;
     private final CategoryKeywordRepository keywordRepository;
     private final ObjectMapper objectMapper;
+    private final EntityManager entityManager;
 
     /**
      * JSON 파일에서 분류 규칙 로드 (참고 레포지토리 JSON 형식과 동일)
@@ -37,12 +39,25 @@ public class RuleManagementService {
             JsonNode rootNode = objectMapper.readTree(jsonFile.getInputStream());
             JsonNode companiesNode = rootNode.get("companies");
 
-            // 기존 데이터 삭제
-            keywordRepository.deleteAll();
-            categoryRepository.deleteAll();
-            companyRepository.deleteAll();
+            // 기존 데이터 삭제 - 올바른 순서로 삭제
+            log.info("기존 데이터 삭제 시작");
+            
+            // 1. 먼저 참조하는 테이블들을 삭제
+            entityManager.createQuery("DELETE FROM ClassifiedTransaction").executeUpdate();
+            entityManager.createQuery("DELETE FROM UnclassifiedTransaction").executeUpdate();
+            entityManager.createQuery("DELETE FROM CategoryKeyword").executeUpdate();
+            
+            // 2. 그 다음 참조되는 테이블들을 삭제
+            entityManager.createQuery("DELETE FROM Category").executeUpdate();
+            entityManager.createQuery("DELETE FROM Company").executeUpdate();
+            
+            // 3. 변경사항을 즉시 반영
+            entityManager.flush();
+            entityManager.clear(); // 영속성 컨텍스트 초기화
+            log.info("기존 데이터 삭제 완료");
 
             // 새 규칙 저장
+            log.info("새 규칙 저장 시작: {}개 회사", companiesNode.size());
             for (JsonNode companyNode : companiesNode) {
                 processCompanyNode(companyNode);
             }
