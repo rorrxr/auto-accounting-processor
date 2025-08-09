@@ -11,8 +11,9 @@ import java.time.LocalDateTime;
  */
 @Entity
 @Getter
+@Setter
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
-@AllArgsConstructor(access = AccessLevel.PRIVATE)
+@AllArgsConstructor
 @Builder
 @Table(name = "merchant_keyword", uniqueConstraints = {
         @UniqueConstraint(columnNames = {"company_id", "category_id", "keyword"})
